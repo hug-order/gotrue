@@ -354,6 +354,7 @@ type SmsProviderConfiguration struct {
 	Messagebird  MessagebirdProviderConfiguration  `json:"messagebird"`
 	Textlocal    TextlocalProviderConfiguration    `json:"textlocal"`
 	Vonage       VonageProviderConfiguration       `json:"vonage"`
+	AliSms       AliSmsProviderConfiguration       `json:"alisms"`
 }
 
 func (c *SmsProviderConfiguration) GetTestOTP(phone string, now time.Time) (string, bool) {
@@ -381,6 +382,14 @@ type TwilioVerifyProviderConfiguration struct {
 type MessagebirdProviderConfiguration struct {
 	AccessKey  string `json:"access_key" split_words:"true"`
 	Originator string `json:"originator" split_words:"true"`
+}
+
+type AliSmsProviderConfiguration struct {
+	AccessKey    string `json:"access_key" split_words:"true"`
+	AccessSecret string `json:"access_secret" split_words:"true"`
+	SignName     string `json:"sign_name" split_words:"true"`
+	RegionID     string `json:"region_id" split_words:"true"`
+	Codes        string `json:"codes" split_words:"true"`
 }
 
 type TextlocalProviderConfiguration struct {
@@ -782,6 +791,26 @@ func (t *MessagebirdProviderConfiguration) Validate() error {
 	if t.Originator == "" {
 		return errors.New("missing Messagebird originator")
 	}
+	return nil
+}
+
+func (t *AliSmsProviderConfiguration) Validate() error {
+	if t.AccessKey == "" {
+		return errors.New("missing AliSms access key")
+	}
+	if t.AccessSecret == "" {
+		return errors.New("missing AliSms secret")
+	}
+	if t.SignName == "" {
+		return errors.New("missing AliSms sign name")
+	}
+	if len(t.Codes) == 0 {
+		return errors.New("missing AliSms sms codes")
+	}
+	if t.RegionID == "" {
+		t.RegionID = "cn-shenzhen"
+	}
+
 	return nil
 }
 
