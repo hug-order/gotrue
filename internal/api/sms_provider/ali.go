@@ -57,7 +57,7 @@ func (t *AliSmsProvider) SendSms(phone, code string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if resp.Body.Code != nil && *resp.Body.Code != "ok" {
+	if resp.Body.Code != nil && *resp.Body.Code != "OK" {
 		return "", errors.New(*resp.Body.Message)
 	}
 
