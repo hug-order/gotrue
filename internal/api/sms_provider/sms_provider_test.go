@@ -33,6 +33,12 @@ func TestSmsProvider(t *testing.T) {
 	ts := &SmsProviderTestSuite{
 		Config: &conf.GlobalConfiguration{
 			Sms: conf.SmsProviderConfiguration{
+				AliSms: conf.AliSmsProviderConfiguration{
+					AccessKey:    "test_access_key",
+					AccessSecret: "test_access_secret",
+					SignName:     "test_sing_name",
+					Code:         "tse_template_code",
+				},
 				Twilio: conf.TwilioProviderConfiguration{
 					AccountSid:        "test_account_sid",
 					AuthToken:         "test_auth_token",
@@ -60,6 +66,20 @@ func TestSmsProvider(t *testing.T) {
 		},
 	}
 	suite.Run(t, ts)
+}
+
+func (ts *SmsProviderTestSuite) TestAlismsSendSms() {
+	defer gock.Off()
+	provider, err := NewAliSmsProvider(ts.Config.Sms.AliSms)
+	require.NoError(ts.T(), err)
+
+	aliSmsProvider, ok := provider.(*AliSmsProvider)
+	require.Equal(ts.T(), true, ok)
+
+	phone := "123456789"
+
+	_, err = aliSmsProvider.SendMessage(phone, "", SMSProvider, "123456")
+	require.NoError(ts.T(), err)
 }
 
 func (ts *SmsProviderTestSuite) TestTwilioSendSms() {
