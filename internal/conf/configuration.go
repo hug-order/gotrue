@@ -389,7 +389,7 @@ type AliSmsProviderConfiguration struct {
 	AccessSecret string `json:"access_secret" split_words:"true"`
 	SignName     string `json:"sign_name" split_words:"true"`
 	RegionID     string `json:"region_id" split_words:"true"`
-	Codes        string `json:"codes" split_words:"true"`
+	Code         string `json:"code" split_words:"true"`
 }
 
 type TextlocalProviderConfiguration struct {
@@ -803,9 +803,6 @@ func (t *AliSmsProviderConfiguration) Validate() error {
 	}
 	if t.SignName == "" {
 		return errors.New("missing AliSms sign name")
-	}
-	if len(t.Codes) == 0 {
-		return errors.New("missing AliSms sms codes")
 	}
 	if t.RegionID == "" {
 		t.RegionID = "cn-shenzhen"
