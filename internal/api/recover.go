@@ -6,7 +6,6 @@ import (
 
 	"github.com/supabase/auth/internal/models"
 	"github.com/supabase/auth/internal/storage"
-	"github.com/supabase/auth/internal/utilities"
 )
 
 // RecoverParams holds the parameters for a password recovery request
@@ -18,7 +17,7 @@ type RecoverParams struct {
 
 func (p *RecoverParams) Validate() error {
 	if p.Email == "" {
-		return unprocessableEntityError("Password recovery requires an email")
+		return badRequestError(ErrorCodeValidationFailed, "Password recovery requires an email")
 	}
 	var err error
 	if p.Email, err = validateEmail(p.Email); err != nil {
@@ -34,7 +33,6 @@ func (p *RecoverParams) Validate() error {
 func (a *API) Recover(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	db := a.db.WithContext(ctx)
-	config := a.config
 	params := &RecoverParams{}
 	if err := retrieveRequestParams(r, params); err != nil {
 		return err
@@ -66,14 +64,11 @@ func (a *API) Recover(w http.ResponseWriter, r *http.Request) error {
 		if terr := models.NewAuditLogEntry(r, tx, user, models.UserRecoveryRequestedAction, "", nil); terr != nil {
 			return terr
 		}
-		mailer := a.Mailer(ctx)
-		referrer := utilities.GetReferrer(r, config)
-		externalURL := getExternalHost(ctx)
-		return a.sendPasswordRecovery(tx, user, mailer, config.SMTP.MaxFrequency, referrer, externalURL, config.Mailer.OtpLength, flowType)
+		return a.sendPasswordRecovery(r, tx, user, flowType)
 	})
 	if err != nil {
 		if errors.Is(err, MaxFrequencyLimitError) {
-			return tooManyRequestsError("For security purposes, you can only request this once every 60 seconds")
+			return tooManyRequestsError(ErrorCodeOverEmailSendRateLimit, "For security purposes, you can only request this once every 60 seconds")
 		}
 		return internalServerError("Unable to process request").WithInternalError(err)
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	mail "github.com/supabase/auth/internal/mailer"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -105,7 +106,7 @@ func (ts *VerifyTestSuite) TestVerifyPasswordRecovery() {
 			assert.WithinDuration(ts.T(), time.Now(), *u.RecoverySentAt, 1*time.Second)
 			assert.False(ts.T(), u.IsConfirmed())
 
-			reqURL := fmt.Sprintf("http://localhost/verify?type=%s&token=%s", recoveryVerification, u.RecoveryToken)
+			reqURL := fmt.Sprintf("http://localhost/verify?type=%s&token=%s", mail.RecoveryVerification, u.RecoveryToken)
 			req = httptest.NewRequest(http.MethodGet, reqURL, nil)
 
 			w = httptest.NewRecorder()
@@ -177,9 +178,13 @@ func (ts *VerifyTestSuite) TestVerifySecureEmailChange() {
 		req := httptest.NewRequest(http.MethodPut, "http://localhost/user", &buffer)
 		req.Header.Set("Content-Type", "application/json")
 
-		// Generate access token for request
+		// Generate access token for request and a mock session
 		var token string
-		token, _, err = ts.API.generateAccessToken(context.Background(), ts.API.db, u, nil, models.MagicLink)
+		session, err := models.NewSession(u.ID, nil)
+		require.NoError(ts.T(), err)
+		require.NoError(ts.T(), ts.API.db.Create(session))
+
+		token, _, err = ts.API.generateAccessToken(context.Background(), ts.API.db, u, &session.ID, models.MagicLink)
 		require.NoError(ts.T(), err)
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
@@ -195,7 +200,7 @@ func (ts *VerifyTestSuite) TestVerifySecureEmailChange() {
 		assert.False(ts.T(), u.IsConfirmed())
 
 		// Verify new email
-		reqURL := fmt.Sprintf("http://localhost/verify?type=%s&token=%s", emailChangeVerification, u.EmailChangeTokenNew)
+		reqURL := fmt.Sprintf("http://localhost/verify?type=%s&token=%s", mail.EmailChangeVerification, u.EmailChangeTokenNew)
 		req = httptest.NewRequest(http.MethodGet, reqURL, nil)
 
 		w = httptest.NewRecorder()
@@ -224,7 +229,7 @@ func (ts *VerifyTestSuite) TestVerifySecureEmailChange() {
 		assert.Equal(ts.T(), singleConfirmation, u.EmailChangeConfirmStatus)
 
 		// Verify old email
-		reqURL = fmt.Sprintf("http://localhost/verify?type=%s&token=%s", emailChangeVerification, u.EmailChangeTokenCurrent)
+		reqURL = fmt.Sprintf("http://localhost/verify?type=%s&token=%s", mail.EmailChangeVerification, u.EmailChangeTokenCurrent)
 		req = httptest.NewRequest(http.MethodGet, reqURL, nil)
 
 		w = httptest.NewRecorder()
@@ -266,7 +271,7 @@ func (ts *VerifyTestSuite) TestExpiredConfirmationToken() {
 	require.NoError(ts.T(), ts.API.db.Update(u))
 
 	// Setup request
-	reqURL := fmt.Sprintf("http://localhost/verify?type=%s&token=%s", signupVerification, u.ConfirmationToken)
+	reqURL := fmt.Sprintf("http://localhost/verify?type=%s&token=%s", mail.SignupVerification, u.ConfirmationToken)
 	req := httptest.NewRequest(http.MethodGet, reqURL, nil)
 
 	// Setup response recorder
@@ -280,9 +285,9 @@ func (ts *VerifyTestSuite) TestExpiredConfirmationToken() {
 
 	f, err := url.ParseQuery(rurl.Fragment)
 	require.NoError(ts.T(), err)
-	assert.Equal(ts.T(), "401", f.Get("error_code"))
+	assert.Equal(ts.T(), "403", f.Get("error_code"))
 	assert.Equal(ts.T(), "Email link is invalid or has expired", f.Get("error_description"))
-	assert.Equal(ts.T(), "unauthorized_client", f.Get("error"))
+	assert.Equal(ts.T(), "access_denied", f.Get("error"))
 }
 
 func (ts *VerifyTestSuite) TestInvalidOtp() {
@@ -302,7 +307,7 @@ func (ts *VerifyTestSuite) TestInvalidOtp() {
 	}
 
 	expectedResponse := ResponseBody{
-		Code: http.StatusUnauthorized,
+		Code: http.StatusForbidden,
 		Msg:  "Token has expired or is invalid",
 	}
 
@@ -313,7 +318,7 @@ func (ts *VerifyTestSuite) TestInvalidOtp() {
 		expected ResponseBody
 	}{
 		{
-			desc:     "Expired Sms OTP",
+			desc:     "Expired SMS OTP",
 			sentTime: time.Now().Add(-48 * time.Hour),
 			body: map[string]interface{}{
 				"type":  smsVerification,
@@ -323,7 +328,7 @@ func (ts *VerifyTestSuite) TestInvalidOtp() {
 			expected: expectedResponse,
 		},
 		{
-			desc:     "Invalid Sms OTP",
+			desc:     "Invalid SMS OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
 				"type":  smsVerification,
@@ -346,7 +351,7 @@ func (ts *VerifyTestSuite) TestInvalidOtp() {
 			desc:     "Invalid Email OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
-				"type":  signupVerification,
+				"type":  mail.SignupVerification,
 				"token": "invalid_otp",
 				"email": u.GetEmail(),
 			},
@@ -760,7 +765,7 @@ func (ts *VerifyTestSuite) TestVerifyBannedUser() {
 
 			f, err := url.ParseQuery(rurl.Fragment)
 			require.NoError(ts.T(), err)
-			assert.Equal(ts.T(), "401", f.Get("error_code"))
+			assert.Equal(ts.T(), "403", f.Get("error_code"))
 		})
 	}
 }
@@ -802,7 +807,7 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 			desc:     "Valid Confirmation OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
-				"type":      signupVerification,
+				"type":      mail.SignupVerification,
 				"tokenHash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
 				"token":     "123456",
 				"email":     u.GetEmail(),
@@ -816,7 +821,7 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 			desc:     "Valid Recovery OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
-				"type":      recoveryVerification,
+				"type":      mail.RecoveryVerification,
 				"tokenHash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
 				"token":     "123456",
 				"email":     u.GetEmail(),
@@ -830,7 +835,7 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 			desc:     "Valid Email OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
-				"type":      emailOTPVerification,
+				"type":      mail.EmailOTPVerification,
 				"tokenHash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
 				"token":     "123456",
 				"email":     u.GetEmail(),
@@ -844,7 +849,7 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 			desc:     "Valid Email Change OTP",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
-				"type":      emailChangeVerification,
+				"type":      mail.EmailChangeVerification,
 				"tokenHash": crypto.GenerateTokenHash(u.EmailChange, "123456"),
 				"token":     "123456",
 				"email":     u.EmailChange,
@@ -872,7 +877,7 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 			desc:     "Valid Signup Token Hash",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
-				"type":       signupVerification,
+				"type":       mail.SignupVerification,
 				"token_hash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
 			},
 			expected: expected{
@@ -884,7 +889,7 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 			desc:     "Valid Email Change Token Hash",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
-				"type":       emailChangeVerification,
+				"type":       mail.EmailChangeVerification,
 				"token_hash": crypto.GenerateTokenHash(u.EmailChange, "123456"),
 			},
 			expected: expected{
@@ -896,7 +901,7 @@ func (ts *VerifyTestSuite) TestVerifyValidOtp() {
 			desc:     "Valid Email Verification Type",
 			sentTime: time.Now(),
 			body: map[string]interface{}{
-				"type":       emailOTPVerification,
+				"type":       mail.EmailOTPVerification,
 				"token_hash": crypto.GenerateTokenHash(u.GetEmail(), "123456"),
 			},
 			expected: expected{
@@ -954,11 +959,11 @@ func (ts *VerifyTestSuite) TestSecureEmailChangeWithTokenHash() {
 		{
 			desc: "Secure Email Change with Token Hash (Success)",
 			firstVerificationBody: map[string]interface{}{
-				"type":       emailChangeVerification,
+				"type":       mail.EmailChangeVerification,
 				"token_hash": currentEmailChangeToken,
 			},
 			secondVerificationBody: map[string]interface{}{
-				"type":       emailChangeVerification,
+				"type":       mail.EmailChangeVerification,
 				"token_hash": newEmailChangeToken,
 			},
 			expectedStatus: http.StatusOK,
@@ -966,14 +971,14 @@ func (ts *VerifyTestSuite) TestSecureEmailChangeWithTokenHash() {
 		{
 			desc: "Secure Email Change with Token Hash. Reusing a token hash twice should fail",
 			firstVerificationBody: map[string]interface{}{
-				"type":       emailChangeVerification,
+				"type":       mail.EmailChangeVerification,
 				"token_hash": currentEmailChangeToken,
 			},
 			secondVerificationBody: map[string]interface{}{
-				"type":       emailChangeVerification,
+				"type":       mail.EmailChangeVerification,
 				"token_hash": currentEmailChangeToken,
 			},
-			expectedStatus: http.StatusUnauthorized,
+			expectedStatus: http.StatusForbidden,
 		},
 	}
 	for _, c := range cases {
@@ -1102,7 +1107,7 @@ func (ts *VerifyTestSuite) TestPrepErrorRedirectURL() {
 	for _, c := range cases {
 		ts.Run(c.desc, func() {
 			req := httptest.NewRequest(http.MethodGet, "http://localhost", nil)
-			rurl, err := ts.API.prepErrorRedirectURL(badRequestError(DefaultError), req, c.rurl, c.flowType)
+			rurl, err := ts.API.prepErrorRedirectURL(badRequestError(ErrorCodeValidationFailed, DefaultError), req, c.rurl, c.flowType)
 			require.NoError(ts.T(), err)
 			require.Equal(ts.T(), c.expected, rurl)
 		})
@@ -1152,7 +1157,7 @@ func (ts *VerifyTestSuite) TestVerifyValidateParams() {
 				Token: "some-token",
 			},
 			method:   http.MethodPost,
-			expected: badRequestError("Only an email address or phone number should be provided on verify"),
+			expected: badRequestError(ErrorCodeValidationFailed, "Only an email address or phone number should be provided on verify"),
 		},
 		{
 			desc: "Cannot send both TokenHash and Token",
@@ -1162,7 +1167,7 @@ func (ts *VerifyTestSuite) TestVerifyValidateParams() {
 				TokenHash: "some-token-hash",
 			},
 			method:   http.MethodPost,
-			expected: badRequestError("Verify requires either a token or a token hash"),
+			expected: badRequestError(ErrorCodeValidationFailed, "Verify requires either a token or a token hash"),
 		},
 		{
 			desc: "No verification type specified",
@@ -1171,7 +1176,7 @@ func (ts *VerifyTestSuite) TestVerifyValidateParams() {
 				Email: "email@example.com",
 			},
 			method:   http.MethodPost,
-			expected: badRequestError("Verify requires a verification type"),
+			expected: badRequestError(ErrorCodeValidationFailed, "Verify requires a verification type"),
 		},
 	}
 

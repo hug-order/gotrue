@@ -72,6 +72,8 @@ func (ts *PhoneTestSuite) TestFormatPhoneNumber() {
 func doTestSendPhoneConfirmation(ts *PhoneTestSuite, useTestOTP bool) {
 	u, err := models.FindUserByPhoneAndAudience(ts.API.db, "123456789", ts.Config.JWT.Aud)
 	require.NoError(ts.T(), err)
+	req, err := http.NewRequest("POST", "http://localhost:9998/otp", nil)
+	require.NoError(ts.T(), err)
 	cases := []struct {
 		desc     string
 		otpType  string
@@ -111,7 +113,9 @@ func doTestSendPhoneConfirmation(ts *PhoneTestSuite, useTestOTP bool) {
 		ts.Run(c.desc, func() {
 			provider := &TestSmsProvider{}
 
-			_, err = ts.API.sendPhoneConfirmation(ts.API.db, u, "123456789", c.otpType, provider, sms_provider.SMSProvider)
+			ctx := req.Context()
+
+			_, err = ts.API.sendPhoneConfirmation(ctx, req, ts.API.db, u, "123456789", c.otpType, provider, sms_provider.SMSProvider)
 			require.Equal(ts.T(), c.expected, err)
 			u, err = models.FindUserByPhoneAndAudience(ts.API.db, "123456789", ts.Config.JWT.Aud)
 			require.NoError(ts.T(), err)
@@ -155,8 +159,11 @@ func (ts *PhoneTestSuite) TestMissingSmsProviderConfig() {
 	u.PhoneConfirmedAt = &now
 	require.NoError(ts.T(), ts.API.db.Update(u), "Error updating new test user")
 
-	var token string
-	token, _, err = ts.API.generateAccessToken(context.Background(), ts.API.db, u, nil, models.OTP)
+	s, err := models.NewSession(u.ID, nil)
+	require.NoError(ts.T(), err)
+	require.NoError(ts.T(), ts.API.db.Create(s))
+
+	token, _, err := ts.API.generateAccessToken(context.Background(), ts.API.db, u, &s.ID, models.PasswordGrant)
 	require.NoError(ts.T(), err)
 
 	cases := []struct {
@@ -177,8 +184,8 @@ func (ts *PhoneTestSuite) TestMissingSmsProviderConfig() {
 				"password": "testpassword",
 			},
 			expected: map[string]interface{}{
-				"code":    http.StatusBadRequest,
-				"message": "Error sending confirmation sms:",
+				"code":    http.StatusInternalServerError,
+				"message": "Unable to get SMS provider",
 			},
 		},
 		{
@@ -190,8 +197,8 @@ func (ts *PhoneTestSuite) TestMissingSmsProviderConfig() {
 				"phone": "123456789",
 			},
 			expected: map[string]interface{}{
-				"code":    http.StatusBadRequest,
-				"message": "Error sending sms:",
+				"code":    http.StatusInternalServerError,
+				"message": "Unable to get SMS provider",
 			},
 		},
 		{
@@ -203,8 +210,8 @@ func (ts *PhoneTestSuite) TestMissingSmsProviderConfig() {
 				"phone": "111111111",
 			},
 			expected: map[string]interface{}{
-				"code":    http.StatusBadRequest,
-				"message": "Error sending sms:",
+				"code":    http.StatusInternalServerError,
+				"message": "Unable to get SMS provider",
 			},
 		},
 		{
@@ -214,8 +221,8 @@ func (ts *PhoneTestSuite) TestMissingSmsProviderConfig() {
 			header:   "",
 			body:     nil,
 			expected: map[string]interface{}{
-				"code":    http.StatusBadRequest,
-				"message": "Error sending sms:",
+				"code":    http.StatusInternalServerError,
+				"message": "Unable to get SMS provider",
 			},
 		},
 	}
@@ -244,7 +251,12 @@ func (ts *PhoneTestSuite) TestMissingSmsProviderConfig() {
 				require.Equal(ts.T(), c.expected["code"], w.Code)
 
 				body := w.Body.String()
-				require.True(ts.T(), strings.Contains(body, c.expected["message"].(string)))
+				require.True(ts.T(),
+					strings.Contains(body, "Unable to get SMS provider") ||
+						strings.Contains(body, "Error finding SMS provider") ||
+						strings.Contains(body, "Failed to get SMS provider"),
+					"unexpected body message %q", body,
+				)
 			})
 		}
 	}

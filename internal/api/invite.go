@@ -7,7 +7,6 @@ import (
 	"github.com/supabase/auth/internal/api/provider"
 	"github.com/supabase/auth/internal/models"
 	"github.com/supabase/auth/internal/storage"
-	"github.com/supabase/auth/internal/utilities"
 )
 
 // InviteParams are the parameters the Signup endpoint accepts
@@ -20,7 +19,6 @@ type InviteParams struct {
 func (a *API) Invite(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	db := a.db.WithContext(ctx)
-	config := a.config
 	adminUser := getAdminUser(ctx)
 	params := &InviteParams{}
 	if err := retrieveRequestParams(r, params); err != nil {
@@ -42,7 +40,7 @@ func (a *API) Invite(w http.ResponseWriter, r *http.Request) error {
 	err = db.Transaction(func(tx *storage.Connection) error {
 		if user != nil {
 			if user.IsConfirmed() {
-				return unprocessableEntityError(DuplicateEmailMsg)
+				return unprocessableEntityError(ErrorCodeEmailExists, DuplicateEmailMsg)
 			}
 		} else {
 			signupParams := SignupParams{
@@ -81,10 +79,7 @@ func (a *API) Invite(w http.ResponseWriter, r *http.Request) error {
 			return terr
 		}
 
-		mailer := a.Mailer(ctx)
-		referrer := utilities.GetReferrer(r, config)
-		externalURL := getExternalHost(ctx)
-		if err := sendInvite(tx, user, mailer, referrer, externalURL, config.Mailer.OtpLength); err != nil {
+		if err := a.sendInvite(r, tx, user); err != nil {
 			return internalServerError("Error inviting user").WithInternalError(err)
 		}
 		return nil

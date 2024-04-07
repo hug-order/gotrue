@@ -13,9 +13,12 @@ import (
 
 	"github.com/gofrs/uuid"
 
+	"database/sql"
+	"github.com/pkg/errors"
 	"github.com/pquerna/otp"
 	"github.com/supabase/auth/internal/conf"
 	"github.com/supabase/auth/internal/models"
+	"github.com/supabase/auth/internal/storage"
 	"github.com/supabase/auth/internal/utilities"
 
 	"github.com/jackc/pgx/v4"
@@ -143,7 +146,7 @@ func (ts *MFATestSuite) TestEnrollFactor() {
 		ts.Run(c.desc, func() {
 			w := performEnrollFlow(ts, token, c.friendlyName, c.factorType, c.issuer, c.expectedCode)
 
-			factors, err := models.FindFactorsByUser(ts.API.db, ts.TestUser)
+			factors, err := FindFactorsByUser(ts.API.db, ts.TestUser)
 			ts.Require().NoError(err)
 			addedFactor := factors[len(factors)-1]
 			require.False(ts.T(), addedFactor.IsVerified())
@@ -168,16 +171,43 @@ func (ts *MFATestSuite) TestDuplicateEnrollsReturnExpectedMessage() {
 	issuer := "https://issuer.com"
 	token := ts.generateAAL1Token(ts.TestUser, &ts.TestSession.ID)
 	_ = performEnrollFlow(ts, token, friendlyName, models.TOTP, issuer, http.StatusOK)
-	response := performEnrollFlow(ts, token, friendlyName, models.TOTP, issuer, http.StatusBadRequest)
+	response := performEnrollFlow(ts, token, friendlyName, models.TOTP, issuer, http.StatusUnprocessableEntity)
 
 	var errorResponse HTTPError
 	err := json.NewDecoder(response.Body).Decode(&errorResponse)
 	require.NoError(ts.T(), err)
 
 	// Convert the response body to a string and check for the expected error message
-	expectedErrorMessage := fmt.Sprintf("a factor with the friendly name %q for this user likely already exists", friendlyName)
+	expectedErrorMessage := fmt.Sprintf("A factor with the friendly name %q for this user likely already exists", friendlyName)
 	require.Contains(ts.T(), errorResponse.Message, expectedErrorMessage)
+}
 
+func (ts *MFATestSuite) TestMultipleEnrollsCleanupExpiredFactors() {
+	// All factors are deleted when a subsequent enroll is made
+	ts.API.config.MFA.FactorExpiryDuration = 0 * time.Second
+	// Verified factor should not be deleted (Factor 1)
+	resp := performTestSignupAndVerify(ts, ts.TestEmail, ts.TestPassword, true /* <- requireStatusOK */)
+	numFactors := 5
+	accessTokenResp := &AccessTokenResponse{}
+	require.NoError(ts.T(), json.NewDecoder(resp.Body).Decode(&accessTokenResp))
+
+	token := accessTokenResp.Token
+	for i := 0; i < numFactors; i++ {
+		_ = performEnrollFlow(ts, token, "", models.TOTP, "https://issuer.com", http.StatusOK)
+	}
+
+	// All Factors except last factor should be expired
+	factors, err := FindFactorsByUser(ts.API.db, ts.TestUser)
+	require.NoError(ts.T(), err)
+
+	// Make a challenge so last, unverified factor isn't deleted on next enroll (Factor 2)
+	_ = performChallengeFlow(ts, factors[len(factors)-1].ID, token)
+
+	// Enroll another Factor (Factor 3)
+	_ = performEnrollFlow(ts, token, "", models.TOTP, "https://issuer.com", http.StatusOK)
+	factors, err = FindFactorsByUser(ts.API.db, ts.TestUser)
+	require.NoError(ts.T(), err)
+	require.Equal(ts.T(), 3, len(factors))
 }
 
 func (ts *MFATestSuite) TestChallengeFactor() {
@@ -198,13 +228,13 @@ func (ts *MFATestSuite) TestMFAVerifyFactor() {
 			desc:             "Invalid: Valid code and expired challenge",
 			validChallenge:   false,
 			validCode:        true,
-			expectedHTTPCode: http.StatusBadRequest,
+			expectedHTTPCode: http.StatusUnprocessableEntity,
 		},
 		{
 			desc:             "Invalid: Invalid code and valid challenge ",
 			validChallenge:   true,
 			validCode:        false,
-			expectedHTTPCode: http.StatusBadRequest,
+			expectedHTTPCode: http.StatusUnprocessableEntity,
 		},
 		{
 			desc:             "Valid /verify request",
@@ -221,7 +251,7 @@ func (ts *MFATestSuite) TestMFAVerifyFactor() {
 			require.NoError(ts.T(), err)
 
 			sharedSecret := ts.TestOTPKey.Secret()
-			factors, err := models.FindFactorsByUser(ts.API.db, ts.TestUser)
+			factors, err := FindFactorsByUser(ts.API.db, ts.TestUser)
 			f := factors[0]
 			f.Secret = sharedSecret
 			require.NoError(ts.T(), err)
@@ -281,7 +311,7 @@ func (ts *MFATestSuite) TestUnenrollVerifiedFactor() {
 		{
 			desc:             "Verified Factor: AAL1",
 			isAAL2:           false,
-			expectedHTTPCode: http.StatusBadRequest,
+			expectedHTTPCode: http.StatusUnprocessableEntity,
 		},
 		{
 			desc:             "Verified Factor: AAL2, Success",
@@ -292,17 +322,17 @@ func (ts *MFATestSuite) TestUnenrollVerifiedFactor() {
 	for _, v := range cases {
 		ts.Run(v.desc, func() {
 			var buffer bytes.Buffer
-			if v.isAAL2 {
-				ts.TestSession.UpdateAssociatedAAL(ts.API.db, models.AAL2.String())
-			}
+
 			// Create Session to test behaviour which downgrades other sessions
-			factors, err := models.FindFactorsByUser(ts.API.db, ts.TestUser)
+			factors, err := FindFactorsByUser(ts.API.db, ts.TestUser)
 			require.NoError(ts.T(), err, "error finding factors")
 			f := factors[0]
 			f.Secret = ts.TestOTPKey.Secret()
 			require.NoError(ts.T(), f.UpdateStatus(ts.API.db, models.FactorStateVerified))
 			require.NoError(ts.T(), ts.API.db.Update(f), "Error updating new test factor")
-
+			if v.isAAL2 {
+				ts.TestSession.UpdateAALAndAssociatedFactor(ts.API.db, models.AAL2, &f.ID)
+			}
 			token := ts.generateAAL1Token(ts.TestUser, &ts.TestSession.ID)
 			w := ServeAuthenticatedRequest(ts, http.MethodDelete, fmt.Sprintf("/factors/%s", f.ID), token, buffer)
 			require.Equal(ts.T(), v.expectedHTTPCode, w.Code)
@@ -431,7 +461,7 @@ func performTestSignupAndVerify(ts *MFATestSuite, email, password string, requir
 
 func performEnrollFlow(ts *MFATestSuite, token, friendlyName, factorType, issuer string, expectedCode int) *httptest.ResponseRecorder {
 	var buffer bytes.Buffer
-	require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(map[string]string{"friendly_name": friendlyName, "factor_type": factorType, "issuer": issuer}))
+	require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(EnrollFactorParams{FriendlyName: friendlyName, FactorType: factorType, Issuer: issuer}))
 	w := ServeAuthenticatedRequest(ts, http.MethodPost, "http://localhost/factors/", token, buffer)
 	require.Equal(ts.T(), expectedCode, w.Code)
 	return w
@@ -631,4 +661,16 @@ func cleanupHook(ts *MFATestSuite, hookName string) {
 	cleanupHookSQL := fmt.Sprintf("drop function if exists %s", hookName)
 	err := ts.API.db.RawQuery(cleanupHookSQL).Exec()
 	require.NoError(ts.T(), err)
+}
+
+// FindFactorsByUser returns all factors belonging to a user ordered by timestamp. Don't use this outside of tests.
+func FindFactorsByUser(tx *storage.Connection, user *models.User) ([]*models.Factor, error) {
+	factors := []*models.Factor{}
+	if err := tx.Q().Where("user_id = ?", user.ID).Order("created_at asc").All(&factors); err != nil {
+		if errors.Cause(err) == sql.ErrNoRows {
+			return factors, nil
+		}
+		return nil, errors.Wrap(err, "Database error when finding MFA factors associated to user")
+	}
+	return factors, nil
 }

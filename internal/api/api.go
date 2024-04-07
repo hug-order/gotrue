@@ -100,11 +100,8 @@ func NewAPIWithVersion(ctx context.Context, globalConfig *conf.GlobalConfigurati
 	r := newRouter()
 	r.Use(addRequestID(globalConfig))
 
-	// request tracing should be added only when tracing or metrics is
-	// enabled
-	if globalConfig.Tracing.Enabled {
-		r.UseBypass(observability.RequestTracing())
-	} else if globalConfig.Metrics.Enabled {
+	// request tracing should be added only when tracing or metrics is enabled
+	if globalConfig.Tracing.Enabled || globalConfig.Metrics.Enabled {
 		r.UseBypass(observability.RequestTracing())
 	}
 
@@ -112,13 +109,7 @@ func NewAPIWithVersion(ctx context.Context, globalConfig *conf.GlobalConfigurati
 	r.Use(recoverer)
 
 	if globalConfig.DB.CleanupEnabled {
-		cleanup := &models.Cleanup{
-			SessionTimebox:           globalConfig.Sessions.Timebox,
-			SessionInactivityTimeout: globalConfig.Sessions.InactivityTimeout,
-		}
-
-		cleanup.Setup()
-
+		cleanup := models.NewCleanup(globalConfig)
 		r.UseBypass(api.databaseCleanup(cleanup))
 	}
 
@@ -155,7 +146,7 @@ func NewAPIWithVersion(ctx context.Context, globalConfig *conf.GlobalConfigurati
 				}
 				if params.Email == "" && params.Phone == "" {
 					if !api.config.External.AnonymousUsers.Enabled {
-						return unprocessableEntityError("Anonymous sign-ins are disabled")
+						return unprocessableEntityError(ErrorCodeAnonymousProviderDisabled, "Anonymous sign-ins are disabled")
 					}
 					if _, err := api.limitHandler(limiter)(w, r); err != nil {
 						return err
@@ -320,7 +311,7 @@ func (a *API) HealthCheck(w http.ResponseWriter, r *http.Request) error {
 }
 
 // Mailer returns NewMailer with the current tenant config
-func (a *API) Mailer(ctx context.Context) mailer.Mailer {
+func (a *API) Mailer() mailer.Mailer {
 	config := a.config
 	return mailer.NewMailer(config)
 }
